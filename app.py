@@ -12,6 +12,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from ocpp.routing import on
 from ocpp.v16 import ChargePoint as OcppChargePoint
 from ocpp.v16 import call_result
+from ocpp.v16.datatypes import IdTagInfo
 from ocpp.v16.enums import Action, RegistrationStatus
 
 logging.basicConfig(level=logging.INFO)
@@ -76,16 +77,16 @@ class Charger(OcppChargePoint):
         p = {"chargePointVendor": charge_point_vendor, "chargePointModel": charge_point_model, "firmwareVersion": firmware_version, **kwargs}; self.event("BootNotification", p)
         with closing(db()) as c:
             c.execute("UPDATE chargers SET vendor=?,model=?,firmware=?,status=?,last_boot=? WHERE charger_id=?", (charge_point_vendor, charge_point_model, firmware_version, "Available", now(), self.charger_id)); c.commit()
-        return call_result.BootNotificationPayload(current_time=now(), interval=60, status=RegistrationStatus.accepted)
+        return call_result.BootNotification(current_time=now(), interval=60, status=RegistrationStatus.accepted)
 
     @on(Action.heartbeat)
-    async def heartbeat(self, **kwargs): self.event("Heartbeat", kwargs); return call_result.HeartbeatPayload(current_time=now())
+    async def heartbeat(self, **kwargs): self.event("Heartbeat", kwargs); return call_result.Heartbeat(current_time=now())
 
     @on(Action.status_notification)
     async def status_notification(self, connector_id, error_code, status, **kwargs):
         p = {"connectorId": connector_id, "errorCode": error_code, "status": status, **kwargs}; self.event("StatusNotification", p)
         with closing(db()) as c: c.execute("UPDATE chargers SET status=? WHERE charger_id=?", (status, self.charger_id)); c.commit()
-        return call_result.StatusNotificationPayload()
+        return call_result.StatusNotification()
 
     @on(Action.meter_values)
     async def meter_values(self, connector_id, meter_value, **kwargs):
@@ -94,19 +95,19 @@ class Charger(OcppChargePoint):
             values = sample.get("sampledValue", []); ts = sample.get("timestamp", now())
             with closing(db()) as c:
                 c.execute("INSERT INTO meter_values(charger_id,timestamp,power,voltage,current,energy,frequency,power_factor,raw_payload) VALUES(?,?,?,?,?,?,?,?,?)", (self.charger_id, ts, reading(values,"Power.Active.Import"), reading(values,"Voltage"), reading(values,"Current.Import"), reading(values,"Energy.Active.Import.Register"), reading(values,"Frequency"), reading(values,"Power.Factor"), json.dumps(sample, default=str))); c.commit()
-        return call_result.MeterValuesPayload()
+        return call_result.MeterValues()
 
     @on(Action.start_transaction)
     async def start_transaction(self, connector_id, id_tag, meter_start, timestamp, **kwargs):
         p={"connectorId":connector_id,"idTag":id_tag,"meterStart":meter_start,"timestamp":timestamp,**kwargs}; self.event("StartTransaction",p)
         with closing(db()) as c: c.execute("INSERT OR REPLACE INTO sessions(transaction_id,charger_id,start_time,start_meter) VALUES(?,?,?,?)", (0, self.charger_id, timestamp, meter_start)); c.commit()
-        return call_result.StartTransactionPayload(transaction_id=0, id_tag_info={"status":"Accepted"})
+        return call_result.StartTransaction(transaction_id=0, id_tag_info=IdTagInfo(status="Accepted"))
 
     @on(Action.stop_transaction)
     async def stop_transaction(self, transaction_id, meter_stop, timestamp, **kwargs):
         p={"transactionId":transaction_id,"meterStop":meter_stop,"timestamp":timestamp,**kwargs}; self.event("StopTransaction",p)
         with closing(db()) as c: c.execute("UPDATE sessions SET end_time=?,end_meter=?,energy=end_meter-start_meter WHERE transaction_id=?", (timestamp,meter_stop,transaction_id)); c.commit()
-        return call_result.StopTransactionPayload(id_tag_info={"status":"Accepted"})
+        return call_result.StopTransaction(id_tag_info=IdTagInfo(status="Accepted"))
 
 @app.on_event("startup")
 def startup(): init_db()

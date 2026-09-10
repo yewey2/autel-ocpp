@@ -51,3 +51,13 @@ GET /api/export/events?format=csv
 ```
 
 No charger control functionality is implemented.
+
+## Run tests
+
+With the virtual environment activated:
+
+```powershell
+python -m unittest discover -s tests -v
+```
+
+These tests do not connect to a real charger. They verify the local app, SQLite initialization, OCPP response classes, routes, and WebSocket adapter.
