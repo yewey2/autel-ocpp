@@ -114,6 +114,13 @@ def startup(): init_db()
 @app.get("/health")
 def health(): return {"status":"ok"}
 
+# Some charger firmware performs an ordinary HTTP(S) reachability check on
+# the configured endpoint before opening the OCPP WebSocket.  Keep this
+# separate from the WebSocket route so that check does not receive a 404.
+@app.get("/{charger_id}")
+def charger_endpoint_check(charger_id: str):
+    return {"status": "ok", "charger_id": charger_id, "websocket": True}
+
 @app.websocket("/{charger_id}")
 async def websocket(websocket: WebSocket, charger_id: str):
     # OCPP 1.6 over WebSocket uses the `ocpp1.6` subprotocol.  The adapter
@@ -121,7 +128,13 @@ async def websocket(websocket: WebSocket, charger_id: str):
     # are the methods expected by python-ocpp.
     requested = websocket.headers.get("sec-websocket-protocol", "")
     subprotocol = "ocpp1.6" if "ocpp1.6" in requested else None
+    log.info("Headers: %s", dict(websocket.headers))
     await websocket.accept(subprotocol=subprotocol)
+    log.info(
+        "connected %s subprotocol=%s",
+        charger_id,
+        websocket.headers.get("sec-websocket-protocol")
+    )
     log.info("connected %s (subprotocol=%s)", charger_id, subprotocol or "none")
     cp = Charger(charger_id, FastAPIWebSocketAdapter(websocket))
     try: await cp.start()
