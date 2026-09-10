@@ -51,8 +51,21 @@ def reading(items, key):
             except (TypeError, ValueError): return None
     return None
 
+class FastAPIWebSocketAdapter:
+    """Adapter from FastAPI WebSocket methods to python-ocpp's interface."""
+
+    def __init__(self, websocket: WebSocket):
+        self.websocket = websocket
+
+    async def recv(self):
+        return await self.websocket.receive_text()
+
+    async def send(self, message):
+        await self.websocket.send_text(message)
+
+
 class Charger(OcppChargePoint):
-    def __init__(self, charger_id, websocket): super().__init__(charger_id, websocket); self.charger_id = charger_id
+    def __init__(self, charger_id, connection): super().__init__(charger_id, connection); self.charger_id = charger_id
     def event(self, typ, payload):
         with closing(db()) as c:
             record_event(c, self.charger_id, typ, payload); c.commit()
@@ -103,8 +116,14 @@ def health(): return {"status":"ok"}
 
 @app.websocket("/{charger_id}")
 async def websocket(websocket: WebSocket, charger_id: str):
-    await websocket.accept(); log.info("connected %s", charger_id)
-    cp = Charger(charger_id, websocket)
+    # OCPP 1.6 over WebSocket uses the `ocpp1.6` subprotocol.  The adapter
+    # converts FastAPI's receive_text/send_text methods to recv/send, which
+    # are the methods expected by python-ocpp.
+    requested = websocket.headers.get("sec-websocket-protocol", "")
+    subprotocol = "ocpp1.6" if "ocpp1.6" in requested else None
+    await websocket.accept(subprotocol=subprotocol)
+    log.info("connected %s (subprotocol=%s)", charger_id, subprotocol or "none")
+    cp = Charger(charger_id, FastAPIWebSocketAdapter(websocket))
     try: await cp.start()
     except WebSocketDisconnect: pass
     except Exception: log.exception("OCPP error for %s", charger_id)

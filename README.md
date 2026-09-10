@@ -34,6 +34,8 @@ For example: `ws://192.168.1.10:8000/CP001`.
 
 ```text
 wss://<your-railway-domain>/<charger_id>
+
+wss://autel-ocpp-production.up.railway.app/CP001
 ```
 
 The dashboard and API are available at the same Railway domain.
