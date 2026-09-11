@@ -159,6 +159,7 @@ async def websocket(websocket: WebSocket, charger_id: str):
     await _websocket_handler(websocket, charger_id)
 
 
+@app.get("/ws/webSocket")
 async def websocket_probe(sn: str | None = Query(None)):
     return Response(
         content="",
