@@ -1,9 +1,10 @@
 import asyncio
 import json
 import unittest
+from unittest.mock import patch
 
 import app as app_module
-from app import Charger, FastAPIWebSocketAdapter, app, health, init_db
+from app import Charger, FastAPIWebSocketAdapter, _websocket_handler, app, health, init_db
 from ocpp.v16 import call_result
 
 
@@ -106,6 +107,42 @@ class AppTests(unittest.TestCase):
             self.assertEqual(await adapter.recv(), '[2,"1","Heartbeat",{}]')
             await adapter.send('reply')
             self.assertEqual(raw.sent, ['reply'])
+
+        asyncio.run(run())
+
+    def test_connection_requests_boot_notification(self):
+        class FakeConnectionWebSocket:
+            headers = {}
+
+            async def accept(self, subprotocol=None):
+                self.subprotocol = subprotocol
+
+        class FakeCharger:
+            instances = []
+
+            def __init__(self, charger_id, connection):
+                self.charger_id = charger_id
+                self.connection = connection
+                self.calls = []
+                self.running = asyncio.Event()
+                self.__class__.instances.append(self)
+
+            async def call(self, payload):
+                self.calls.append(payload)
+                self.running.set()
+                return "Accepted"
+
+            async def start(self):
+                await self.running.wait()
+
+        async def run():
+            websocket = FakeConnectionWebSocket()
+            with patch.object(app_module, "Charger", FakeCharger):
+                await _websocket_handler(websocket, "CP001")
+            self.assertEqual(len(FakeCharger.instances), 1)
+            request = FakeCharger.instances[0].calls[0]
+            self.assertEqual(request.__class__.__name__, "TriggerMessage")
+            self.assertEqual(request.requested_message.value, "BootNotification")
 
         asyncio.run(run())
 
