@@ -113,6 +113,7 @@ class AppTests(unittest.TestCase):
         paths = {route.path for route in app.routes}
         self.assertIn("/health", paths)
         self.assertIn("/{charger_id}", paths)
+        self.assertIn("/ws/webSocket", paths)
 
 
 if __name__ == "__main__":

@@ -122,8 +122,7 @@ def health(): return {"status":"ok"}
 def charger_endpoint_check(charger_id: str):
     return {"status": "ok", "charger_id": charger_id, "websocket": True}
 
-@app.websocket("/{charger_id}")
-async def websocket(websocket: WebSocket, charger_id: str):
+async def _websocket_handler(websocket: WebSocket, charger_id: str):
     # OCPP 1.6 over WebSocket uses the `ocpp1.6` subprotocol.  The adapter
     # converts FastAPI's receive_text/send_text methods to recv/send, which
     # are the methods expected by python-ocpp.
@@ -142,6 +141,14 @@ async def websocket(websocket: WebSocket, charger_id: str):
     except WebSocketDisconnect: pass
     except Exception: log.exception("OCPP error for %s", charger_id)
     finally: log.info("disconnected %s", charger_id)
+
+@app.websocket("/{charger_id}")
+async def websocket(websocket: WebSocket, charger_id: str):
+    await _websocket_handler(websocket, charger_id)
+
+@app.websocket("/ws/webSocket")
+async def websocket_compat(websocket: WebSocket, sn: str = Query(...)):
+    await _websocket_handler(websocket, sn)
 
 def rows(sql, args=()):
     with closing(db()) as c: return [dict(x) for x in c.execute(sql,args).fetchall()]
