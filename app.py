@@ -1,4 +1,5 @@
 import csv
+import asyncio
 import io
 import json
 import logging
@@ -11,9 +12,10 @@ from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from ocpp.routing import on
 from ocpp.v16 import ChargePoint as OcppChargePoint
+from ocpp.v16 import call
 from ocpp.v16 import call_result
 from ocpp.v16.datatypes import IdTagInfo
-from ocpp.v16.enums import Action, RegistrationStatus
+from ocpp.v16.enums import Action, MessageTrigger, RegistrationStatus
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("ev-monitor")
@@ -137,10 +139,20 @@ async def _websocket_handler(websocket: WebSocket, charger_id: str):
     )
     log.info("connected %s (subprotocol=%s)", charger_id, subprotocol or "none")
     cp = Charger(charger_id, FastAPIWebSocketAdapter(websocket))
-    try: await cp.start()
+    receive_task = asyncio.create_task(cp.start())
+    try:
+        response = await cp.call(call.TriggerMessage(
+            requested_message=MessageTrigger.boot_notification
+        ))
+        log.info("requested BootNotification from %s: %s", charger_id, response)
+        await receive_task
+    except asyncio.CancelledError: pass
     except WebSocketDisconnect: pass
     except Exception: log.exception("OCPP error for %s", charger_id)
-    finally: log.info("disconnected %s", charger_id)
+    finally:
+        receive_task.cancel()
+        await asyncio.gather(receive_task, return_exceptions=True)
+        log.info("disconnected %s", charger_id)
 
 @app.websocket("/{charger_id}")
 async def websocket(websocket: WebSocket, charger_id: str):
