@@ -8,7 +8,7 @@ import sqlite3
 from contextlib import closing
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from ocpp.routing import on
 from ocpp.v16 import ChargePoint as OcppChargePoint
@@ -157,6 +157,19 @@ async def _websocket_handler(websocket: WebSocket, charger_id: str):
 @app.websocket("/{charger_id}")
 async def websocket(websocket: WebSocket, charger_id: str):
     await _websocket_handler(websocket, charger_id)
+
+
+@app.get("/ws/webSocket")
+def ws_check(sn: str | None = Query(...)):
+    raise HTTPException(
+        status_code=426,
+        detail="Upgrade Required"
+    )
+    # return "426 Upgrade Required"
+    # return {
+    #     "status": "ok",
+    #     "websocket": True
+    # }
 
 @app.websocket("/ws/webSocket")
 async def websocket_compat(websocket: WebSocket, sn: str = Query(...)):
