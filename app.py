@@ -9,7 +9,7 @@ from contextlib import closing
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException, Response, Query, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from ocpp.routing import on
 from ocpp.v16 import ChargePoint as OcppChargePoint
 from ocpp.v16 import call
@@ -160,14 +160,19 @@ async def websocket(websocket: WebSocket, charger_id: str):
 
 
 @app.get("/ws/webSocket")
-async def websocket_probe(sn: str | None = Query(None)):
-    return Response(
-        content="",
+async def websocket_probe(request: Request, sn: str | None = Query(None)):
+    log.warning(
+        "GET probe sn=%s headers=%s",
+        sn,
+        dict(request.headers)
+    )
+    return PlainTextResponse(
+        content="426 Upgrade Required",
         status_code=426,
-        headers={
-            "Upgrade": "websocket",
-            "Connection": "Upgrade",
-        },
+        # headers={
+        #     "Upgrade": "websocket",
+        #     "Connection": "Upgrade",
+        # },
     )
     # raise HTTPException(
     #     status_code=426,
