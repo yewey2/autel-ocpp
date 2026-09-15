@@ -65,7 +65,7 @@ Single page, no auth needed for PoC.
 Log connections, disconnections, Heartbeat, MeterValues, BootNotification, StatusNotification, and errors to standard application logs.
 
 ## Deployment (Railway)
-- Listen on `process.env.PORT` (`port = int(os.getenv("PORT", 8000))`)
+- Listen on `process.env.PORT` (`port = int(os.getenv("PORT", 8080))`)
 - Must support persistent WebSocket connections
 - No charger auth / no dashboard login for now. Future (not now): API keys, JWT, OAuth, OCPP security profiles.
 
