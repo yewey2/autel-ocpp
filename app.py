@@ -1,5 +1,4 @@
 import csv
-import asyncio
 import io
 import json
 import logging
@@ -12,10 +11,9 @@ from fastapi import FastAPI, HTTPException, Response, Query, Request, WebSocket,
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from ocpp.routing import on
 from ocpp.v16 import ChargePoint as OcppChargePoint
-from ocpp.v16 import call
 from ocpp.v16 import call_result
-from ocpp.v16.datatypes import IdTagInfo
-from ocpp.v16.enums import Action, MessageTrigger, RegistrationStatus
+from ocpp.v16.datatypes import ConfigurationKey, IdTagInfo
+from ocpp.v16.enums import Action, RegistrationStatus
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("ev-monitor")
@@ -23,6 +21,19 @@ log = logging.getLogger("ev-monitor")
 DATA_DIR = os.getenv("DATA_DIR") or ("/data" if os.path.isdir("/data") else "data")
 DB_PATH = os.path.join(DATA_DIR, "ev_monitor.db")
 app = FastAPI(title="EV Charger Monitoring")
+
+@app.middleware("http")
+async def log_http_requests(request: Request, call_next):
+    log.info(
+        "HTTP %s %s upgrade=%s protocol=%s",
+        request.method,
+        request.url,
+        request.headers.get("upgrade"),
+        request.headers.get("sec-websocket-protocol"),
+    )
+    response = await call_next(request)
+    log.info("HTTP response %s %s -> %s", request.method, request.url, response.status_code)
+    return response
 
 def now(): return datetime.now(timezone.utc).isoformat()
 
@@ -102,14 +113,54 @@ class Charger(OcppChargePoint):
     @on(Action.start_transaction)
     async def start_transaction(self, connector_id, id_tag, meter_start, timestamp, **kwargs):
         p={"connectorId":connector_id,"idTag":id_tag,"meterStart":meter_start,"timestamp":timestamp,**kwargs}; self.event("StartTransaction",p)
-        with closing(db()) as c: c.execute("INSERT OR REPLACE INTO sessions(transaction_id,charger_id,start_time,start_meter) VALUES(?,?,?,?)", (0, self.charger_id, timestamp, meter_start)); c.commit()
-        return call_result.StartTransaction(transaction_id=0, id_tag_info=IdTagInfo(status="Accepted"))
+        with closing(db()) as c:
+            transaction_id = c.execute("SELECT COALESCE(MAX(transaction_id), 0) + 1 FROM sessions").fetchone()[0]
+            c.execute("INSERT INTO sessions(transaction_id,charger_id,start_time,start_meter) VALUES(?,?,?,?)", (transaction_id, self.charger_id, timestamp, meter_start)); c.commit()
+        return call_result.StartTransaction(transaction_id=transaction_id, id_tag_info=IdTagInfo(status="Accepted"))
 
     @on(Action.stop_transaction)
     async def stop_transaction(self, transaction_id, meter_stop, timestamp, **kwargs):
         p={"transactionId":transaction_id,"meterStop":meter_stop,"timestamp":timestamp,**kwargs}; self.event("StopTransaction",p)
         with closing(db()) as c: c.execute("UPDATE sessions SET end_time=?,end_meter=?,energy=end_meter-start_meter WHERE transaction_id=?", (timestamp,meter_stop,transaction_id)); c.commit()
         return call_result.StopTransaction(id_tag_info=IdTagInfo(status="Accepted"))
+
+    @on(Action.get_configuration)
+    async def get_configuration(self, key=None, **kwargs):
+        """Answer the configuration query used by EVCC during OCPP setup."""
+        supported = {
+            "NumberOfConnectors": ("1", True),
+            "MeterValuesSampledData": ("Energy.Active.Import.Register,Power.Active.Import,Voltage,Current.Import", False),
+            "MeterValueSampleInterval": ("10", False),
+            "WebSocketPingInterval": ("30", False),
+            "SupportedFeatureProfiles": ("Core", True),
+        }
+        requested = key or list(supported)
+        configuration_key = [
+            ConfigurationKey(key=name, readonly=readonly, value=value)
+            for name in requested
+            if name in supported
+            for value, readonly in [supported[name]]
+        ]
+        unknown_key = [name for name in requested if name not in supported]
+        return call_result.GetConfiguration(configuration_key=configuration_key, unknown_key=unknown_key)
+
+    @on(Action.change_configuration)
+    async def change_configuration(self, key, value, **kwargs):
+        """Accept the safe telemetry settings EVCC may configure."""
+        accepted = {
+            "MeterValuesSampledData",
+            "MeterValueSampleInterval",
+            "WebSocketPingInterval",
+        }
+        status = "Accepted" if key in accepted else "NotSupported"
+        self.event("ChangeConfiguration", {"key": key, "value": value, "status": status, **kwargs})
+        return call_result.ChangeConfiguration(status=status)
+
+    @on(Action.trigger_message)
+    async def trigger_message(self, requested_message, connector_id=None, **kwargs):
+        """Acknowledge EVCC's request; the charger may send the requested CALL later."""
+        self.event("TriggerMessage", {"requestedMessage": requested_message, "connectorId": connector_id, **kwargs})
+        return call_result.TriggerMessage(status="Accepted")
 
 @app.on_event("startup")
 def startup(): init_db()
@@ -129,8 +180,13 @@ async def _websocket_handler(websocket: WebSocket, charger_id: str):
     # converts FastAPI's receive_text/send_text methods to recv/send, which
     # are the methods expected by python-ocpp.
     requested = websocket.headers.get("sec-websocket-protocol", "")
-    subprotocol = "ocpp1.6" if "ocpp1.6" in requested else None
     log.info("Headers: %s", dict(websocket.headers))
+    protocols = [item.strip() for item in requested.split(",")]
+    if "ocpp1.6" not in protocols:
+        log.error("rejecting %s: missing ocpp1.6 subprotocol; received=%r", charger_id, requested)
+        await websocket.close(code=1002)
+        return
+    subprotocol = "ocpp1.6"
     await websocket.accept(subprotocol=subprotocol)
     log.info(
         "connected %s subprotocol=%s",
@@ -139,23 +195,17 @@ async def _websocket_handler(websocket: WebSocket, charger_id: str):
     )
     log.info("connected %s (subprotocol=%s)", charger_id, subprotocol or "none")
     cp = Charger(charger_id, FastAPIWebSocketAdapter(websocket))
-    receive_task = asyncio.create_task(cp.start())
-    try:
-        response = await cp.call(call.TriggerMessage(
-            requested_message=MessageTrigger.boot_notification
-        ))
-        log.info("requested BootNotification from %s: %s", charger_id, response)
-        await receive_task
-    except asyncio.CancelledError: pass
+    try: await cp.start()
     except WebSocketDisconnect: pass
     except Exception: log.exception("OCPP error for %s", charger_id)
-    finally:
-        receive_task.cancel()
-        await asyncio.gather(receive_task, return_exceptions=True)
-        log.info("disconnected %s", charger_id)
+    finally: log.info("disconnected %s", charger_id)
 
-@app.websocket("/{charger_id}")
-async def websocket(websocket: WebSocket, charger_id: str):
+@app.websocket("/{path:path}")
+async def websocket(websocket: WebSocket, path: str):
+    """Accept Autel's station-id path and its /ws/webSocket?sn= variant."""
+    charger_id = path.strip("/") or websocket.query_params.get("sn") or "unknown"
+    if path.lower() == "ws/websocket":
+        charger_id = websocket.query_params.get("sn") or "unknown"
     await _websocket_handler(websocket, charger_id)
 
 
@@ -183,10 +233,6 @@ async def websocket_probe(request: Request, sn: str | None = Query(None)):
     #     "status": "ok",
     #     "websocket": True
     # }
-
-@app.websocket("/ws/webSocket")
-async def websocket_compat(websocket: WebSocket, sn: str = Query(...)):
-    await _websocket_handler(websocket, sn)
 
 def rows(sql, args=()):
     with closing(db()) as c: return [dict(x) for x in c.execute(sql,args).fetchall()]
@@ -221,4 +267,4 @@ def dashboard(): return HTML
 HTML = """<!doctype html><title>EV Monitor</title><meta name=viewport content='width=device-width,initial-scale=1'><style>body{font:16px system-ui;max-width:1100px;margin:2rem auto;padding:0 1rem;background:#f5f7fa;color:#17202a}main{display:grid;grid-template-columns:repeat(4,1fr);gap:1rem}.card,section{background:white;padding:1rem;border-radius:12px;box-shadow:0 1px 5px #ccd}table{width:100%;border-collapse:collapse}td,th{padding:.6rem;text-align:left;border-bottom:1px solid #eee}@media(max-width:700px){main{grid-template-columns:repeat(2,1fr)}}</style><h1>EV Charger Monitor</h1><main id=cards></main><section><h2>Chargers</h2><table><thead><tr><th>ID</th><th>Status</th><th>Power</th><th>Energy</th><th>Last seen</th></tr></thead><tbody id=rows></tbody></table></section><script>async function refresh(){let c=await (await fetch('/api/chargers')).json();let s=await (await fetch('/api/sessions')).json();let m=await (await fetch('/api/export/meter-values')).json();cards.innerHTML=[['Total Chargers',c.length],['Online Chargers',c.filter(x=>x.last_seen&&Date.now()-Date.parse(x.last_seen)<180000).length],['Active Sessions',s.filter(x=>!x.end_time).length],['Energy Readings',m.length]].map(x=>`<div class=card><small>${x[0]}</small><h2>${x[1]}</h2></div>`).join('');rows.innerHTML=c.map(x=>{let v=m.filter(y=>y.charger_id==x.charger_id).pop()||{};return `<tr><td>${x.charger_id}</td><td>${x.status||'Unknown'}</td><td>${v.power??'-'}</td><td>${v.energy??'-'}</td><td>${x.last_seen||'-'}</td></tr>`}).join('')}refresh();setInterval(refresh,10000)</script>"""
 
 if __name__ == "__main__":
-    import uvicorn; uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT",8000)))
+    import uvicorn; uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT",8887)))

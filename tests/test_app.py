@@ -110,7 +110,7 @@ class AppTests(unittest.TestCase):
 
         asyncio.run(run())
 
-    def test_connection_requests_boot_notification(self):
+    def test_connection_starts_ocpp_loop_without_trigger_message(self):
         class FakeConnectionWebSocket:
             headers = {}
 
@@ -124,25 +124,23 @@ class AppTests(unittest.TestCase):
                 self.charger_id = charger_id
                 self.connection = connection
                 self.calls = []
-                self.running = asyncio.Event()
                 self.__class__.instances.append(self)
 
             async def call(self, payload):
                 self.calls.append(payload)
-                self.running.set()
                 return "Accepted"
 
             async def start(self):
-                await self.running.wait()
+                self.started = True
+                raise app_module.WebSocketDisconnect()
 
         async def run():
             websocket = FakeConnectionWebSocket()
             with patch.object(app_module, "Charger", FakeCharger):
                 await _websocket_handler(websocket, "CP001")
             self.assertEqual(len(FakeCharger.instances), 1)
-            request = FakeCharger.instances[0].calls[0]
-            self.assertEqual(request.__class__.__name__, "TriggerMessage")
-            self.assertEqual(request.requested_message.value, "BootNotification")
+            self.assertTrue(FakeCharger.instances[0].started)
+            self.assertEqual(FakeCharger.instances[0].calls, [])
 
         asyncio.run(run())
 
