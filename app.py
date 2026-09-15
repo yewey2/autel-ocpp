@@ -12,7 +12,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Str
 from ocpp.routing import on
 from ocpp.v16 import ChargePoint as OcppChargePoint
 from ocpp.v16 import call_result
-from ocpp.v16.datatypes import ConfigurationKey, IdTagInfo
+from ocpp.v16.datatypes import IdTagInfo, KeyValue
 from ocpp.v16.enums import Action, RegistrationStatus
 
 logging.basicConfig(level=logging.INFO)
@@ -136,7 +136,7 @@ class Charger(OcppChargePoint):
         }
         requested = key or list(supported)
         configuration_key = [
-            ConfigurationKey(key=name, readonly=readonly, value=value)
+            KeyValue(key=name, readonly=readonly, value=value)
             for name in requested
             if name in supported
             for value, readonly in [supported[name]]

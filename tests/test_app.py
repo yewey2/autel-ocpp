@@ -1,6 +1,10 @@
 import asyncio
 import json
+import subprocess
+import sys
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import app as app_module
@@ -20,6 +24,35 @@ class FakeWebSocket:
 
 
 class AppTests(unittest.TestCase):
+    def setUp(self):
+        # Keep test telemetry separate from the local/Railway database.
+        # Use the workspace rather than the system temp directory: the test
+        # runner may be sandboxed from accessing the latter.
+        self.temp_dir = tempfile.TemporaryDirectory(
+            dir=Path(__file__).resolve().parent
+        )
+        self.db_patch = patch.object(app_module, "DATA_DIR", self.temp_dir.name)
+        self.path_patch = patch.object(
+            app_module, "DB_PATH", str(Path(self.temp_dir.name) / "ev_monitor.db")
+        )
+        self.db_patch.start()
+        self.path_patch.start()
+
+    def tearDown(self):
+        self.path_patch.stop()
+        self.db_patch.stop()
+        self.temp_dir.cleanup()
+
+    def test_application_imports_in_a_clean_process(self):
+        """Catch missing/incompatible imports before the deployment starts."""
+        result = subprocess.run(
+            [sys.executable, "-c", "import app"],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_health(self):
         self.assertEqual(health(), {"status": "ok"})
 
@@ -98,6 +131,13 @@ class AppTests(unittest.TestCase):
             )
             self.assertEqual(stopped.id_tag_info.status, "Accepted")
 
+            configuration = await charger.get_configuration(
+                key=["NumberOfConnectors", "NotAConfigurationKey"]
+            )
+            self.assertEqual(configuration.configuration_key[0].key, "NumberOfConnectors")
+            self.assertTrue(configuration.configuration_key[0].readonly)
+            self.assertEqual(configuration.unknown_key, ["NotAConfigurationKey"])
+
         asyncio.run(run())
 
     def test_websocket_adapter(self):
@@ -112,7 +152,7 @@ class AppTests(unittest.TestCase):
 
     def test_connection_starts_ocpp_loop_without_trigger_message(self):
         class FakeConnectionWebSocket:
-            headers = {}
+            headers = {"sec-websocket-protocol": "ocpp1.6"}
 
             async def accept(self, subprotocol=None):
                 self.subprotocol = subprotocol
